@@ -1,5 +1,6 @@
 
 import numpy as np
+import logging as log
 from keras.datasets import imdb
 from keras.preprocessing import sequence
 from ntext.envs.datasets.base import NtextDataset
@@ -8,6 +9,10 @@ from ntext.envs.datasets.base import NtextDataset
 class ImdbDataset(NtextDataset):
 
     def __init__(self):
+        self.maxlen = 200
+        self.max_features = 5000
+        self.ngrams = 1
+        self.skip_top= 100
         self.x_train = None
         self.x_test = None
         self.y_train = None
@@ -57,51 +62,48 @@ class ImdbDataset(NtextDataset):
     def load(self):
         # Set parameters:
         # ngram_range = 2 will add bi-grams features
-        ngram_range = 1
-        max_features = 20000
-        maxlen = 400
 
-        print('Loading data...')
-        (x_train, y_train), (x_test, y_test) = imdb.load_data(num_words=max_features)
-        print(len(x_train), 'train sequences')
-        print(len(x_test), 'test sequences')
-        print('Average train sequence length: {}'.format(
+        log.info('Loading data...')
+        (x_train, y_train), (x_test, y_test) = imdb.load_data(num_words=self.max_features, skip_top=self.skip_top)
+        log.info('{} train sequences'.format(len(x_train)))
+        log.info('{} test sequences'.format(len(x_test)))
+        log.info('Average train sequence length: {}'.format(
             np.mean(list(map(len, x_train)), dtype=int)))
-        print('Average test sequence length: {}'.format(
+        log.info('Average test sequence length: {}'.format(
             np.mean(list(map(len, x_test)), dtype=int)))
 
-        if ngram_range > 1:
-            print('Adding {}-gram features'.format(ngram_range))
+        if self.ngrams > 1:
+            log.info('Adding {}-gram features'.format(self.ngrams))
             # Create set of unique n-gram from the training set.
             ngram_set = set()
             for input_list in x_train:
-                for i in range(2, ngram_range + 1):
+                for i in range(2, self.ngrams + 1):
                     set_of_ngram = self.create_ngram_set(input_list, ngram_value=i)
                     ngram_set.update(set_of_ngram)
 
             # Dictionary mapping n-gram token to a unique integer.
             # Integer values are greater than max_features in order
             # to avoid collision with existing features.
-            start_index = max_features + 1
+            start_index = self.max_features + 1
             token_indice = {v: k + start_index for k, v in enumerate(ngram_set)}
             indice_token = {token_indice[k]: k for k in token_indice}
 
             # max_features is the highest integer that could be found in the dataset.
-            max_features = np.max(list(indice_token.keys())) + 1
+            self.max_features = np.max(list(indice_token.keys())) + 1
 
             # Augmenting x_train and x_test with n-grams features
-            x_train = self.add_ngram(x_train, token_indice, ngram_range)
-            x_test = self.add_ngram(x_test, token_indice, ngram_range)
-            print('Average train sequence length: {}'.format(
+            x_train = self.add_ngram(x_train, token_indice, self.ngrams)
+            x_test = self.add_ngram(x_test, token_indice, self.ngrams)
+            log.info('Average train sequence length: {}'.format(
                 np.mean(list(map(len, x_train)), dtype=int)))
-            print('Average test sequence length: {}'.format(
+            log.info('Average test sequence length: {}'.format(
                 np.mean(list(map(len, x_test)), dtype=int)))
 
-        print('Pad sequences (samples x time)')
-        x_train = sequence.pad_sequences(x_train, maxlen=maxlen)
-        x_test = sequence.pad_sequences(x_test, maxlen=maxlen)
-        print('x_train shape:', x_train.shape)
-        print('x_test shape:', x_test.shape)
+        log.info('Pad sequences (samples x time)')
+        x_train = sequence.pad_sequences(x_train, maxlen=self.maxlen)
+        x_test = sequence.pad_sequences(x_test, maxlen=self.maxlen)
+        log.info('x_train shape: {}'.format(x_train.shape))
+        log.info('x_test shape: {}'.format(x_test.shape))
 
         self.x_train = x_train
         self.x_test = x_test
@@ -109,6 +111,7 @@ class ImdbDataset(NtextDataset):
         self.y_test = y_test
 
     def get_tfidf(self):
+        #todo: this is wrong
         from sklearn.feature_extraction.text import TfidfTransformer
         transformer = TfidfTransformer()
         X = transformer.fit_transform(self.x_train)

@@ -1,26 +1,24 @@
 
 import os
-import csv
 import gym
 import numpy as np
 import logging as log
-import tensorflow as tf
 
 from argparse import ArgumentParser
 from datetime import datetime
-from keras.preprocessing import sequence
-from keras.models import Sequential
-from keras.layers import Dense
-from keras.layers import Embedding
-from keras.layers import GlobalAveragePooling1D
-from keras.datasets import imdb
-from keras.models import Sequential
-from keras.layers import Dense, InputLayer
-from keras.callbacks import TensorBoard
 
 from sklearn.metrics.pairwise import cosine_similarity
+from keras.layers import Dense, InputLayer
+from keras.layers import Embedding
+from keras.layers import GlobalAveragePooling1D
+from keras.models import Sequential
+
 from ntext.envs.datasets.imdb import ImdbDataset
-from base_agent import BaseAgent
+from agents.base_agent import BaseAgent
+
+
+REP_MODEL_REGRESSION = 'regression'
+REP_MODEL_FASTTEXT = 'fasttext'
 
 
 class NtextAgent(BaseAgent):
@@ -28,9 +26,10 @@ class NtextAgent(BaseAgent):
         super().__init__(args)
         log.info('initializing ntext agent...')
         self.args = args
-        self.env = gym.make('ntext:NText-v0')
-        self.env.max_episode_steps = args.num_episodes
-        self.num_epochs = args.num_epochs
+
+        #todo: when using naive method use tfidf
+        self.env = gym.make('ntext:NText-v0', max_episode_steps=args.max_episode_steps)
+        self.num_episodes = args.num_episodes
         self.num_games = 5
         dateTimeObj = datetime.now()
         self.run_id = dateTimeObj.strftime("%Y%m%d%H%M%S")
@@ -45,12 +44,17 @@ class NtextAgent(BaseAgent):
         ngram_range = 1
         max_features = 20000
         maxlen = 400
+
+        self.dataset = ImdbDataset()
+        self.dataset.load()
+
+        max_features = self.dataset.max_features
+        maxlen = self.dataset.maxlen
+
         batch_size = 32
         embedding_dims = 50
         epochs = 5
 
-        self.dataset = ImdbDataset()
-        self.dataset.load()
         x_train = self.dataset.x_train
         x_test = self.dataset.x_test
         y_train = self.dataset.y_train
@@ -88,7 +92,7 @@ class NtextAgent(BaseAgent):
         s_table = np.random.rand(10,400)
         r_avg_list = []
 
-        for g in range(self.num_epochs):
+        for g in range(self.num_episodes):
             s = self.env.reset()
             done = False
             r_sum = 0
@@ -119,6 +123,48 @@ class NtextAgent(BaseAgent):
         # self.cloud_handler.upload_jobdir()
         return r_table
 
+    def get_representation_model(self):
+
+        if self.args.rep_model == REP_MODEL_REGRESSION:
+            model = Sequential()
+            model.add(InputLayer(batch_input_shape=(1, 200)))
+            model.add(Dense(10, activation='sigmoid'))
+            model.add(Dense(2, activation='linear'))
+            # regression for 2 values (0, 1)
+            model.compile(
+                loss='mse',
+                optimizer='adam',
+                metrics=['mae']
+            )
+            return model
+
+        if self.args.rep_model == REP_MODEL_FASTTEXT:
+            model = Sequential()
+
+            # we start off with an efficient embedding layer which maps
+            # our vocab indices into embeddings_size dimensions
+            embeddings_size = 50
+            embeddings_layer = Embedding(
+                input_dim=self.env.dataset.max_features,
+                output_dim=embeddings_size,
+                input_length=self.env.dataset.maxlen
+            )
+            model.add(embeddings_layer)
+
+            # we add a GlobalAveragePooling1D, which will average the embeddings
+            # of all words in the document
+            model.add(GlobalAveragePooling1D())
+
+            # We project onto a single unit output layer, and squash it with a sigmoid:
+            model.add(Dense(2, activation='sigmoid'))
+
+            model.compile(
+                loss='binary_crossentropy',
+                optimizer='adam',
+                metrics=['accuracy']
+            )
+            return model
+
     def deep_q_learning(self):
         # create the keras model
         logdir = os.path.join(self.args.job_dir, "logs/scalars/" + datetime.now().strftime("%Y%m%d-%H%M%S"))
@@ -127,18 +173,15 @@ class NtextAgent(BaseAgent):
 
         #tensorboard_callback = TensorBoard(log_dir=logdir)
 
-        model = Sequential()
-        model.add(InputLayer(batch_input_shape=(1, 400)))
-        model.add(Dense(10, activation='sigmoid'))
-        model.add(Dense(2, activation='linear'))
-        model.compile(loss='mse', optimizer='adam', metrics=['mae'])
+        model = self.get_representation_model()
+
         # now execute the q learning
         y = 0.95
-        eps = 0.5
+        eps = 0.05
         decay_factor = 0.999
         r_avg_list = []
 
-        for i in range(self.num_epochs):
+        for i in range(self.num_episodes):
             s = self.env.reset()
             eps *= decay_factor
             done = False
@@ -146,17 +189,21 @@ class NtextAgent(BaseAgent):
 
             while not done:
                 ntext = self.env.render()
+                ntext = ntext.reshape(-1,1).T
 
                 if np.random.random() < eps:
+                    target_vec = model.predict(ntext)[0]
                     a = np.random.randint(0, 2)
                 else:
-                    ta = model.predict(ntext)
-                    a = np.argmax(ta)
+                    target_vec = model.predict(ntext)[0]
+                    a = np.argmax(target_vec)
                 new_s, r, done, _ = self.env.step(a)
-                new_ntext = self.env.render()
+                new_ntext = self.env.render().reshape(-1,1).T
                 target = r + y * np.max(model.predict(new_ntext))
-                target_vec = model.predict(ntext)[0]
-                target_vec[a] = target
+                #todo: not working with target (delayed reward), check!!
+
+                target_vec[a] = 1 if r == 1 else -1 # target
+                target_vec = np.argsort(target_vec)
 
                 model.fit(
                     ntext,
@@ -171,12 +218,15 @@ class NtextAgent(BaseAgent):
 
             mean_reward = r_sum / self.env.max_episode_steps
             r_avg_list.append([ datetime.now().timestamp(), mean_reward])
-            log.info('epoch: {}/{}, mean reward: {}'.format(i, self.num_epochs, mean_reward))
+            log.info('episode: {}/{}, mean reward: {}'.format(i, self.num_episodes, mean_reward))
 
         self.write_results('ntext_deep_q_learning', r_avg_list)
 
     def run(self):
-        # self.fasttext_classifier()
+        # show hyperparams
+        log.info(self.args)
+
+        #self.fasttext_classifier()
         # self.naive_sum_reward()
         self.deep_q_learning()
 
@@ -198,12 +248,18 @@ def parse_args():
         type=lambda x: os.path.expanduser(x)
     )
     parser.add_argument(
-        '--num-episodes',
+        '--rep-model',
+        default=REP_MODEL_REGRESSION,
+        type=str,
+        choices=[REP_MODEL_REGRESSION,REP_MODEL_FASTTEXT]
+    )
+    parser.add_argument(
+        '--max-episode-steps',
         default=50,
         type=int
     )
     parser.add_argument(
-        '--num-epochs',
+        '--num-episodes',
         default=5,
         type=int
     )

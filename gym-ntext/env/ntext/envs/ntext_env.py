@@ -10,13 +10,13 @@ from ntext.envs.datasets.factory import FactoryDataset
 class NtextEnv(gym.Env):
     metadata = {'render.modes': ['human']}
 
-    def __init__(self, n=5, slip=0.2, small=0, large=1):
-        logging.info('initializing environment...')
+    def __init__(self, max_episode_steps=None, n=5, slip=0.2, small=0, large=1):
+        logging.info('initializing gym ntext environment...')
         self.dataset = FactoryDataset.get_dataset('imdb')
         self.dataset.load()
-        #self.x_train = self.dataset.x_train
-        self.x_train = self.dataset.get_tfidf()
-        self.max_episode_steps = len(self.x_train)
+        self.x_train = self.dataset.x_train
+        #self.x_train = self.dataset.get_tfidf()
+        self.max_episode_steps = len(self.x_train) if max_episode_steps is None else max_episode_steps
         self.n = n
         self.slip = slip  # probability of 'slipping' an action
         self.small = small  # payout for 'backwards' action
@@ -25,7 +25,8 @@ class NtextEnv(gym.Env):
         self.action_space = spaces.Discrete(2)
         self.observation_space = spaces.Discrete(self.n)
         self.seed()
-        logging.info('initializing environment...[ok]')
+        logging.info('max episode steps:{}'.format(self.max_episode_steps))
+        logging.info('initializing gym ntext environment...[ok]')
 
     def seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)

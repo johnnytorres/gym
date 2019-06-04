@@ -5,10 +5,10 @@ from setuptools import setup
 REQUIRED_PACKAGES = ['tensorflow', 'keras', 'sklearn', 'gym']
 
 setup(
-    name='gym-xdrl',
-    version='0.0.1',
+    name='gym-ntext',
+    version='0.0.3',
     install_requires=REQUIRED_PACKAGES,
-    packages=find_packages(),
+    packages=['agents'],#find_packages(),
     include_package_data=True,
     description=''
 )

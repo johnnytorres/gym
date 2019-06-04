@@ -37,3 +37,8 @@ tutorial/*.html
 # PyCharm project files
 .idea
 vizdoom.ini
+/gym-ntext/config.yaml
+/gym-ntext/Dockerfile.docker
+/gym-ntext/gcloud_auth.json
+/gym-ntext/plot_results.ipynb
+/gym-ntext/xrun.sh
