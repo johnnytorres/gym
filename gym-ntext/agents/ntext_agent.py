@@ -6,19 +6,22 @@ import logging as log
 
 from argparse import ArgumentParser
 from datetime import datetime
-
 from sklearn.metrics.pairwise import cosine_similarity
 from keras.layers import Dense, InputLayer
 from keras.layers import Embedding
 from keras.layers import GlobalAveragePooling1D
 from keras.models import Sequential
-
+from keras.utils import to_categorical
+from keras.callbacks import TensorBoard
 from ntext.envs.datasets.imdb import ImdbDataset
 from agents.base_agent import BaseAgent
 
 
 REP_MODEL_REGRESSION = 'regression'
 REP_MODEL_FASTTEXT = 'fasttext'
+RL_MODEL_FASTTEXT = 'clf-fasttext'  # just for comparison
+RL_MODEL_NAIVE = 'rl-naive'
+RL_MODEL_DEEPQ = 'rl-deepq'
 
 
 class NtextAgent(BaseAgent):
@@ -26,13 +29,15 @@ class NtextAgent(BaseAgent):
         super().__init__(args)
         log.info('initializing ntext agent...')
         self.args = args
-
         #todo: when using naive method use tfidf
-        self.env = gym.make('ntext:NText-v0', max_episode_steps=args.max_episode_steps)
+        self.env = gym.make(
+            'ntext:NText-v0',
+            max_episode_steps = args.max_episode_steps,
+            max_sequence_len = args.max_sequence_len
+        )
         self.num_episodes = args.num_episodes
         self.num_games = 5
-        dateTimeObj = datetime.now()
-        self.run_id = dateTimeObj.strftime("%Y%m%d%H%M%S")
+        self.batch_size = 32
         # self.cloud_handler = CloudHandler(args)
         if not self.args.job_dir.startswith('gs://'):
             os.makedirs(self.args.job_dir, exist_ok=True)
@@ -43,7 +48,10 @@ class NtextAgent(BaseAgent):
         # ngram_range = 2 will add bi-grams features
         ngram_range = 1
         max_features = 20000
-        maxlen = 400
+        #maxlen = 400
+
+        #logdir = os.path.join(self.args.job_dir, "logs/scalars/" + datetime.now().strftime("%Y%m%d-%H%M%S"))
+        #tensorboard_callback = TensorBoard(log_dir=logdir)
 
         self.dataset = ImdbDataset()
         self.dataset.load()
@@ -51,9 +59,8 @@ class NtextAgent(BaseAgent):
         max_features = self.dataset.max_features
         maxlen = self.dataset.maxlen
 
-        batch_size = 32
-        embedding_dims = 50
-        epochs = 5
+        embedding_dims = self.args.embeddings_dim
+        epochs = self.num_episodes
 
         x_train = self.dataset.x_train
         x_test = self.dataset.x_test
@@ -80,10 +87,23 @@ class NtextAgent(BaseAgent):
                       optimizer='adam',
                       metrics=['accuracy'])
 
-        model.fit(x_train, y_train,
-                  batch_size=batch_size,
-                  epochs=epochs,
-                  validation_data=(x_test, y_test))
+        model.fit(
+            x_train, y_train,
+            batch_size=self.batch_size,
+            epochs=epochs,
+            validation_data=(x_test, y_test),
+            #callbacks=[tensorboard_callback]
+        )
+
+        results=[]
+        for metric, values in model.history.history.items():
+            r = [[self.run_id, datetime.now().timestamp(), epoch, metric, val] for epoch, val in enumerate(values)]
+            results.extend(r)
+        self.write_results('clf_fasttext_', results)
+
+        log.info('done')
+
+
 
     def naive_sum_reward(self):
         # this is the table that will hold our summated rewards for
@@ -126,51 +146,54 @@ class NtextAgent(BaseAgent):
     def get_representation_model(self):
 
         if self.args.rep_model == REP_MODEL_REGRESSION:
-            model = Sequential()
-            model.add(InputLayer(batch_input_shape=(1, 200)))
-            model.add(Dense(10, activation='sigmoid'))
-            model.add(Dense(2, activation='linear'))
-            # regression for 2 values (0, 1)
-            model.compile(
-                loss='mse',
-                optimizer='adam',
-                metrics=['mae']
-            )
-            return model
+            return self.get_rep_model_regression()
 
         if self.args.rep_model == REP_MODEL_FASTTEXT:
-            model = Sequential()
+            return self.get_rep_model_fasttext()
 
-            # we start off with an efficient embedding layer which maps
-            # our vocab indices into embeddings_size dimensions
-            embeddings_size = 50
-            embeddings_layer = Embedding(
-                input_dim=self.env.dataset.max_features,
-                output_dim=embeddings_size,
-                input_length=self.env.dataset.maxlen
-            )
-            model.add(embeddings_layer)
+        raise NotImplemented('Representation model not implemented!')
 
-            # we add a GlobalAveragePooling1D, which will average the embeddings
-            # of all words in the document
-            model.add(GlobalAveragePooling1D())
+    def get_rep_model_fasttext(self):
+        model = Sequential()
+        # we start off with an efficient embedding layer which maps
+        # our vocab indices into embeddings_size dimensions
+        embeddings_size = self.args.embeddings_dim
+        embeddings_layer = Embedding(
+            input_dim=self.env.dataset.max_features,
+            output_dim=embeddings_size,
+            input_length=self.env.dataset.maxlen
+        )
+        model.add(embeddings_layer)
+        # we add a GlobalAveragePooling1D, which will average the embeddings
+        # of all words in the document
+        model.add(GlobalAveragePooling1D())
+        # We project onto a single unit output layer, and squash it with a sigmoid:
+        model.add(Dense(2, activation='sigmoid'))
+        model.compile(
+            loss='binary_crossentropy',
+            optimizer='adam',
+            metrics=['accuracy']
+        )
+        return model
 
-            # We project onto a single unit output layer, and squash it with a sigmoid:
-            model.add(Dense(2, activation='sigmoid'))
-
-            model.compile(
-                loss='binary_crossentropy',
-                optimizer='adam',
-                metrics=['accuracy']
-            )
-            return model
+    def get_rep_model_regression(self):
+        model = Sequential()
+        model.add(InputLayer(batch_input_shape=(1, self.env.dataset.maxlen)))
+        model.add(Dense(10, activation='sigmoid'))
+        model.add(Dense(2, activation='linear'))
+        # regression for 2 values (0, 1)
+        model.compile(
+            loss='mse',
+            optimizer='adam',
+            metrics=['mae']
+        )
+        return model
 
     def deep_q_learning(self):
         # create the keras model
-        logdir = os.path.join(self.args.job_dir, "logs/scalars/" + datetime.now().strftime("%Y%m%d-%H%M%S"))
+        #logdir = os.path.join(self.args.job_dir, "logs/scalars/" + datetime.now().strftime("%Y%m%d-%H%M%S"))
         #file_writer = tf.summary(logdir + "/metrics")
         #file_writer.set_as_default()
-
         #tensorboard_callback = TensorBoard(log_dir=logdir)
 
         model = self.get_representation_model()
@@ -180,12 +203,14 @@ class NtextAgent(BaseAgent):
         eps = 0.05
         decay_factor = 0.999
         r_avg_list = []
+        history = {}
 
         for i in range(self.num_episodes):
             s = self.env.reset()
             eps *= decay_factor
             done = False
             r_sum = 0
+            history_epoch = {}
 
             while not done:
                 ntext = self.env.render()
@@ -213,22 +238,57 @@ class NtextAgent(BaseAgent):
                     #callbacks=[tensorboard_callback]
                 )
 
+                for metric, values in model.history.history.items():
+                    for epoch, val in enumerate(values):
+                        if metric in history_epoch:
+                            history_epoch[metric].append(val)
+                        else:
+                            history_epoch[metric] = [val]
+
                 s = new_s
                 r_sum += r
 
+            # calculate over validation data
+            y = to_categorical(self.env.dataset.y_test)
+            metrics=model.evaluate(self.env.dataset.x_test, y, batch_size=self.batch_size, verbose=0)
+
+            for metric, value in zip(model.metrics_names, metrics):
+                history_epoch['val_'+metric] = value
+
+            # calculate metrics
             mean_reward = r_sum / self.env.max_episode_steps
-            r_avg_list.append([ datetime.now().timestamp(), mean_reward])
+            r_avg_list.append( mean_reward)
+            for metric, values in history_epoch.items():
+                avg_val = np.mean(values)
+                if metric in history:
+                    history[metric].append(avg_val)
+                else:
+                    history[metric] = [avg_val]
             log.info('episode: {}/{}, mean reward: {}'.format(i, self.num_episodes, mean_reward))
 
-        self.write_results('ntext_deep_q_learning', r_avg_list)
+        history['reward'] = r_avg_list
+
+        results=[]
+        for metric, values in history.items():
+            r = [[self.run_id, datetime.now().timestamp(), epoch, metric, val] for epoch, val in enumerate(values)]
+            results.extend(r)
+        self.write_results('rl_deepq_', results)
 
     def run(self):
-        # show hyperparams
+        log.info('Parameters')
         log.info(self.args)
 
-        #self.fasttext_classifier()
-        # self.naive_sum_reward()
-        self.deep_q_learning()
+        for _ in range(self.args.num_experiments):
+            dateTimeObj = datetime.now()
+            self.run_id = dateTimeObj.strftime("%Y%m%d%H%M%S")
+            if self.args.model == RL_MODEL_FASTTEXT:
+                self.fasttext_classifier()
+            elif self.args.model == RL_MODEL_NAIVE:
+                self.naive_sum_reward()
+            elif self.args.model == RL_MODEL_DEEPQ:
+                self.deep_q_learning()
+            else:
+                raise NotImplemented('RL model not implemented')
 
 
 
@@ -248,6 +308,12 @@ def parse_args():
         type=lambda x: os.path.expanduser(x)
     )
     parser.add_argument(
+        '--model',
+        default=RL_MODEL_DEEPQ,
+        type=str,
+        choices=[RL_MODEL_NAIVE,RL_MODEL_FASTTEXT, RL_MODEL_DEEPQ]
+    )
+    parser.add_argument(
         '--rep-model',
         default=REP_MODEL_REGRESSION,
         type=str,
@@ -263,15 +329,21 @@ def parse_args():
         default=5,
         type=int
     )
-    # parser.add_argument(
-    #     '--downsample',
-    #     default=0.1,
-    #     type=float
-    # )
-    # parser.add_argument(
-    #     '--optimize',
-    #     action='store_true'
-    # )
+    parser.add_argument(
+        '--num-experiments',
+        default=1,
+        type=int
+    )
+    parser.add_argument(
+        '--embeddings-dim',
+        default=50,
+        type=int
+    )
+    parser.add_argument(
+        '--max-sequence-len',
+        default=200,
+        type=int
+    )
     args = parser.parse_args()
     return args
 

@@ -10,9 +10,11 @@ from ntext.envs.datasets.factory import FactoryDataset
 class NtextEnv(gym.Env):
     metadata = {'render.modes': ['human']}
 
-    def __init__(self, max_episode_steps=None, n=5, slip=0.2, small=0, large=1):
+    def __init__(self, max_episode_steps=None, n=5, slip=0.2, small=0, large=1,
+                 max_sequence_len=200):
         logging.info('initializing gym ntext environment...')
         self.dataset = FactoryDataset.get_dataset('imdb')
+        self.dataset.maxlen = max_sequence_len
         self.dataset.load()
         self.x_train = self.dataset.x_train
         #self.x_train = self.dataset.get_tfidf()
